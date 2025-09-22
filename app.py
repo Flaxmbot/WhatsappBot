@@ -6,7 +6,6 @@ from flask import Flask, request, jsonify
 import requests
 import google.generativeai as genai
 from groq import Groq
-from deep_translator import GoogleTranslator
 import sqlite3
 from threading import Thread
 from twilio.rest import Client
@@ -108,34 +107,41 @@ def save_conversation(user_phone, message, response, language='en'):
         logger.error(f"Error saving conversation: {e}")
 
 # --- Language and AI Functions ---
-def detect_language(text):
-    logger.info(f"Detecting language for: '{text[:50]}...'")
+def translate_with_gemini(text, target_lang):
+    """Detects source language and translates text using Gemini, returning a dictionary."""
+    logger.info(f"Starting translation process for target language '{target_lang}'...")
     try:
-        lang = GoogleTranslator().detect(text)[0]
-        logger.info(f"Detected language: {lang}")
-        return lang
+        prompt = f"""Analyze the following text. First, identify its source language. Second, translate it to {target_lang}.
+        Provide the output ONLY as a valid JSON object with two keys: "detected_language" and "translated_text".
+        Text to analyze: "{text}"
+        """
+        response = gemini_model.generate_content(prompt)
+        
+        # Clean the response to ensure it's valid JSON
+        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
+        result = json.loads(cleaned_response)
+        
+        logger.info(f"Gemini translation successful. Detected language: {result.get('detected_language')}")
+        return result
     except Exception as e:
-        logger.error(f"Language detection failed: {e}. Defaulting to 'en'.")
-        return 'en'
-
-def translate_text(text, target_lang='en', source_lang='auto'):
-    if target_lang == source_lang: return text
-    logger.info(f"Translating text from '{source_lang}' to '{target_lang}'...")
-    try:
-        translated_text = GoogleTranslator(source=source_lang, target=target_lang).translate(text)
-        logger.info("Translation successful.")
-        return translated_text
-    except Exception as e:
-        logger.error(f"Translation failed: {e}. Returning original text.")
-        return text
+        logger.error(f"Gemini translation/detection failed: {e}. Defaulting to English.")
+        return {"detected_language": "en", "translated_text": text}
 
 def get_gemini_response(prompt, model_name='gemini-2.5-flash'):
     if not gemini_model: return "AI service is not configured."
     logger.info(f"Getting response from Gemini model: {model_name}...")
     try:
         model = genai.GenerativeModel(model_name)
-        context = "You are a helpful AI health assistant. Provide accurate, helpful health information, but always include a disclaimer that you are not a medical professional and users should consult a doctor for medical advice."
-        response = model.generate_content(f"{context}\n\nUser question: {prompt}\n\nResponse:")
+        context = """
+        You are Dr. AI, an AI Health Advisor with the persona of an experienced, empathetic, and professional doctor.
+        Your communication must be:
+        1.  **Direct and Clear:** Address the user directly.
+        2.  **Concise:** Provide point-to-point health information without conversational filler.
+        3.  **Structured:** Use bullet points or numbered lists for clarity.
+        4.  **Reassuring but Professional:** Maintain a tone that is both comforting and authoritative.
+        5.  **Disclaimer-First:** This is not a substitute for professional medical advice. Always encourage users to consult a real doctor for any health concerns.
+        """
+        response = model.generate_content(f"{context}\n\nHere is the user's question: {prompt}\n\nYour response:")
         logger.info(f"Successfully received response from {model_name}.")
         return response.text
     except Exception as e:
@@ -149,8 +155,8 @@ def get_perplexity_search(query):
         response = requests.post("https://api.perplexity.ai/chat/completions",
             headers={"Authorization": f"Bearer {Config.PERPLEXITY_API_KEY}"},
             json={"model": "llama-3-sonar-large-32k-online", "messages": [
-                {"role": "system", "content": "You are a helpful health information assistant."},
-                {"role": "user", "content": f"Search for recent, reliable information about: {query}"}
+                {"role": "system", "content": "You are a health information search expert. Find the most relevant, recent, and reliable medical information for the user's query."},
+                {"role": "user", "content": f"Search for: {query}"}
             ]})
         if response.status_code == 200:
             logger.info("Perplexity search successful.")
@@ -163,14 +169,12 @@ def get_perplexity_search(query):
 
 def get_groq_summary(text):
     if not groq_client: return None
-    # Note: As of late 2025, Groq does not have a model named 'gpt-oss-120b'. 
-    # Using a powerful available alternative: llama3-70b-8192.
     model_to_use = "llama3-70b-8192"
     logger.info(f"Summarizing text with Groq model {model_to_use}...")
     try:
         completion = groq_client.chat.completions.create(model=model_to_use,
             messages=[
-                {"role": "system", "content": "Summarize this health information concisely."},
+                {"role": "system", "content": "You are a medical summarizer. Refine the following health information into a concise, point-to-point summary for a patient. Maintain a professional and clear tone. Remove conversational filler and focus only on key actionable advice and critical information."},
                 {"role": "user", "content": text}
             ])
         logger.info("Groq summary successful.")
@@ -190,31 +194,27 @@ def determine_response_strategy(message):
     logger.info(f"Determined response strategy: '{strategy}'")
     return strategy
 
-def process_health_query(message, user_lang='en'):
-    strategy = determine_response_strategy(message)
-    english_message = translate_text(message, 'en', user_lang)
+def process_health_query(message_in_english):
+    strategy = determine_response_strategy(message_in_english)
     
     response = ""
     if strategy == 'emergency':
         response = "If this is a medical emergency, please call your local emergency number immediately. I cannot provide emergency medical care."
     elif strategy == 'search_and_reason':
-        search_result = get_perplexity_search(english_message)
+        search_result = get_perplexity_search(message_in_english)
         if search_result:
-            gemini_prompt = f"Based on this recent health information: {search_result}\n\nUser question: {english_message}"
+            gemini_prompt = f"Based on this recent health information: {search_result}\n\nUser question: {message_in_english}"
             gemini_response = get_gemini_response(gemini_prompt)
-            # Fallback to gemini if groq fails
             response = get_groq_summary(gemini_response) or gemini_response
         else:
             logger.warning("Perplexity search failed. Falling back to Gemini directly.")
-            response = get_gemini_response(english_message)
+            response = get_gemini_response(message_in_english)
     else: # reason_only
-        gemini_response = get_gemini_response(english_message)
-        # Fallback to gemini if groq fails
+        gemini_response = get_gemini_response(message_in_english)
         response = get_groq_summary(gemini_response) or gemini_response
         
-    final_response = translate_text(response, user_lang, 'en')
-    logger.info(f"Generated final response for user.")
-    return final_response
+    logger.info(f"Generated final response for user in English.")
+    return response
 
 def send_whatsapp_message(to_phone, message_body):
     if not twilio_client:
@@ -236,11 +236,24 @@ def send_whatsapp_message(to_phone, message_body):
 def process_message_background(user_phone, user_message):
     logger.info(f"Starting background processing for user {user_phone}.")
     try:
-        user_lang = detect_language(user_message)
-        response = process_health_query(user_message, user_lang)
-        disclaimer = "\n\n⚠️ This is not medical advice. Please consult a healthcare professional."
-        final_response = response + translate_text(disclaimer, user_lang, 'en')
+        # 1. Translate user message to English and detect their language
+        translation_result = translate_with_gemini(user_message, "English")
+        english_message = translation_result['translated_text']
+        user_lang = translation_result['detected_language']
+        logger.info(f"User language is '{user_lang}', translated message is '{english_message}'")
+
+        # 2. Process the query in English to get the core response
+        response_in_english = process_health_query(english_message)
+
+        # 3. Add disclaimer
+        disclaimer = "\n\n---\n*This is not a substitute for professional medical advice. Please consult a doctor for any health concerns.*"
+        full_response_in_english = response_in_english + disclaimer
+
+        # 4. Translate the full response back to the user's language
+        final_translation_result = translate_with_gemini(full_response_in_english, user_lang)
+        final_response = final_translation_result['translated_text']
         
+        # 5. Send and save
         if send_whatsapp_message(user_phone, final_response):
             save_conversation(user_phone, user_message, final_response, user_lang)
         else:
@@ -280,3 +293,4 @@ if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
