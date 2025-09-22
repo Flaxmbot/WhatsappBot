@@ -266,7 +266,6 @@ def get_groq_summary(text):
             temperature=0.7,
             max_tokens=8192,
             top_p=1,
-            reasoning_effort="medium",
             stream=False,  # Changed to False for non-streaming
             stop=None
         )
