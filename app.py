@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from datetime import datetime
+import time
 from flask import Flask, request, jsonify
 import requests
 import google.generativeai as genai
@@ -36,7 +37,7 @@ groq_client = None
 try:
     if Config.GEMINI_API_KEY:
         genai.configure(api_key=Config.GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        gemini_model = genai.GenerativeModel('gemini-2.5-pro')
     else:
         logger.warning("GEMINI_API_KEY not set. Gemini features will be disabled.")
 
@@ -114,7 +115,7 @@ def get_perplexity_search(query):
     try:
         url = "https://api.perplexity.ai/chat/completions"
         payload = {
-            "model": "llama-3.1-sonar-small-128k-online",
+            "model": "llama-3-sonar-large-32k-online",
             "messages": [
                 {"role": "system", "content": "You are a helpful health information assistant."},
                 {"role": "user", "content": f"Search for recent, reliable information about: {query}"}
@@ -143,7 +144,7 @@ def get_groq_summary(text):
                 {"role": "system", "content": "Summarize this health information concisely."},
                 {"role": "user", "content": text}
             ],
-            model="llama-3.1-70b-versatile",
+            model="llama3-70b-8192",
         )
         return chat_completion.choices[0].message.content
     except Exception as e:
@@ -199,7 +200,14 @@ def save_conversation(user_phone, message, response, language='en'):
     try:
         conn = sqlite3.connect('health_bot.db')
         cursor = conn.cursor()
+        
+        # Save the conversation
         cursor.execute("INSERT INTO conversations (user_phone, message, response, language) VALUES (?, ?, ?, ?)", (user_phone, message, response, language))
+        
+        # Add or update user profile
+        cursor.execute("INSERT OR IGNORE INTO user_profiles (phone) VALUES (?)", (user_phone,))
+        cursor.execute("UPDATE user_profiles SET last_active = ? WHERE phone = ?", (datetime.now(), user_phone))
+        
         conn.commit()
         conn.close()
     except Exception as e:
@@ -245,7 +253,40 @@ def handle_webhook():
 def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
+def broadcast_startup_message():
+    """Sends a startup message to all known users."""
+    try:
+        conn = sqlite3.connect('health_bot.db')
+        cursor = conn.cursor()
+        # Fetch all unique phone numbers from the user_profiles table
+        cursor.execute("SELECT phone FROM user_profiles")
+        users = cursor.fetchall()
+        conn.close()
+
+        if not users:
+            logger.info("No users found to broadcast startup message.")
+            return
+
+        startup_message = "Hello! The Health AI Chatbot is back online and ready to assist you. 🤖"
+        logger.info(f"Broadcasting startup message to {len(users)} user(s)...")
+
+        for user in users:
+            user_phone = user[0]
+            send_whatsapp_message(user_phone, startup_message)
+            time.sleep(1) # Add a 1-second delay to avoid rate limiting
+
+        logger.info("Startup broadcast complete.")
+    except Exception as e:
+        logger.error(f"Error during startup broadcast: {e}")
+
 if __name__ == '__main__':
     init_db()
+    
+    # Run the broadcast in a separate thread so it doesn't block the server from starting
+    # Note: When deploying with Gunicorn (like on Render), this __main__ block is not executed.
+    # This broadcast will only run when you start the app locally with `python app.py`.
+    broadcast_thread = Thread(target=broadcast_startup_message)
+    broadcast_thread.start()
+    
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
