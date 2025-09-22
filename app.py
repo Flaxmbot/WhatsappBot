@@ -8,7 +8,7 @@ import google.generativeai as genai
 from groq import Groq
 import asyncio
 import aiohttp
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 import re
 from werkzeug.security import generate_password_hash
 import sqlite3
@@ -46,7 +46,6 @@ app.config.from_object(Config)
 genai.configure(api_key=Config.GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 groq_client = Groq(api_key=Config.GROQ_API_KEY)
-translator = Translator()
 
 # Initialize database
 def init_db():
@@ -82,17 +81,19 @@ def init_db():
 # Language detection and translation functions
 def detect_language(text):
     try:
-        detection = translator.detect(text)
-        return detection.lang if detection.confidence > 0.7 else 'en'
-    except:
+        detected = GoogleTranslator().detect(text)
+        if detected and len(detected) > 0:
+            return detected[0][1]
+        return 'en'
+    except Exception as e:
+        logger.error(f"Language detection error: {e}")
         return 'en'
 
 def translate_text(text, target_lang='en', source_lang='auto'):
-    if target_lang == 'en' and source_lang == 'en':
+    if target_lang == source_lang:
         return text
     try:
-        translated = translator.translate(text, dest=target_lang, src=source_lang)
-        return translated.text
+        return GoogleTranslator(source=source_lang, target=target_lang).translate(text)
     except Exception as e:
         logger.error(f"Translation error: {e}")
         return text
