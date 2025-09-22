@@ -168,13 +168,8 @@ def get_gemini_response(prompt, model_name='gemini-2.5-flash', conversation_hist
         
         # Build context with conversation history if available
         context = """
-        You are Dr. AI, an AI Health Advisor with the persona of an experienced, empathetic, and professional doctor.
-        Your communication must be:
-        1.  **Direct and Clear:** Address the user directly.
-        2.  **Concise:** Provide point-to-point health information without conversational filler.
-        3.  **Structured:** Use bullet points or numbered lists for clarity.
-        4.  **Reassuring but Professional:** Maintain a tone that is both comforting and authoritative.
-        5.  **Disclaimer-First:** This is not a substitute for professional medical advice. Always encourage users to consult a real doctor for any health concerns.
+        You are a health advisor.
+        Keep responses simple and short.
         """
         
         # Add conversation history to context if provided
@@ -196,14 +191,28 @@ def get_gemini_response(prompt, model_name='gemini-2.5-flash', conversation_hist
 
 def get_perplexity_search(query):
     if not Config.PERPLEXITY_API_KEY: return None
-    logger.info(f"Searching Perplexity (sonar) for: '{query}'")
+    logger.info(f"Searching Perplexity (sonar-pro) for: '{query}'")
     try:
-        response = requests.post("https://api.perplexity.ai/chat/completions",
-            headers={"Authorization": f"Bearer {Config.PERPLEXITY_API_KEY}"},
-            json={"model": "sonar", "messages": [
-                {"role": "system", "content": "You are a health information search expert. Find the most relevant, recent, and reliable medical information for the user's query."},
-                {"role": "user", "content": f"Search for: {query}"}
-            ]})
+        response = requests.post(
+            'https://api.perplexity.ai/chat/completions',
+            headers={
+                'Authorization': f'Bearer {Config.PERPLEXITY_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': 'sonar-pro',
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': "You are a health information search expert. Find the most relevant, recent, and reliable medical information for the user's query."
+                    },
+                    {
+                        'role': 'user',
+                        'content': query
+                    }
+                ]
+            }
+        )
         if response.status_code == 200:
             logger.info("Perplexity search successful.")
             return response.json()['choices'][0]['message']['content']
@@ -215,14 +224,22 @@ def get_perplexity_search(query):
 
 def get_groq_summary(text):
     if not groq_client: return None
-    model_to_use = "gpt-oss-120b"
+    model_to_use = "openai/gpt-oss-120b"
     logger.info(f"Summarizing text with Groq model {model_to_use}...")
     try:
-        completion = groq_client.chat.completions.create(model=model_to_use,
+        completion = groq_client.chat.completions.create(
+            model=model_to_use,
             messages=[
                 {"role": "system", "content": "You are a medical summarizer. Refine the following health information into a concise, point-to-point summary for a patient. Maintain a professional and clear tone. Remove conversational filler and focus only on key actionable advice and critical information."},
                 {"role": "user", "content": text}
-            ])
+            ],
+            temperature=1,
+            max_completion_tokens=8192,
+            top_p=1,
+            reasoning_effort="medium",
+            stream=False,  # Changed to False for non-streaming
+            stop=None
+        )
         logger.info("Groq summary successful.")
         return completion.choices[0].message.content
     except Exception as e:
@@ -266,6 +283,13 @@ def send_whatsapp_message(to_phone, message_body):
     if not twilio_client:
         logger.error("Cannot send message, Twilio client not initialized.")
         return False
+    
+    # Truncate message if it exceeds Twilio's limit for WhatsApp (4096 characters)
+    max_length = 4000
+    if len(message_body) > max_length:
+        message_body = message_body[:max_length-3] + "..."
+        logger.info(f"Message truncated to {max_length} characters to comply with Twilio limits.")
+    
     logger.info(f"Attempting to send message to {to_phone} via Twilio...")
     try:
         message = twilio_client.messages.create(
@@ -294,9 +318,8 @@ def process_message_background(user_phone, user_message):
         # 3. Process the query in English to get the core response, using conversation history
         response_in_english = process_health_query(english_message, user_phone, conversation_history)
 
-        # 4. Add disclaimer
-        disclaimer = "\n\n---\n*This is not a substitute for professional medical advice. Please consult a doctor for any health concerns.*"
-        full_response_in_english = response_in_english + disclaimer
+        # 4. Keep response simple
+        full_response_in_english = response_in_english
 
         # 5. Translate the full response back to the user's language
         final_translation_result = translate_with_gemini(full_response_in_english, user_lang)
@@ -342,4 +365,3 @@ if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
