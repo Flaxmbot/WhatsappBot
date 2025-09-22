@@ -182,7 +182,7 @@ def process_health_query(message, user_lang='en'):
 # WhatsApp API functions
 def send_whatsapp_message(to_phone, message):
     try:
-        url = f"https://graph.facebook.com/v18.0/{Config.WHATSAPP_PHONE_NUMBER_ID}/messages"
+        url = f"https://graph.facebook.com/v20.0/{Config.WHATSAPP_PHONE_NUMBER_ID}/messages"
         headers = {"Authorization": f"Bearer {Config.WHATSAPP_TOKEN}", "Content-Type": "application/json"}
         data = {"messaging_product": "whatsapp", "to": to_phone, "type": "text", "text": {"body": message}}
         response = requests.post(url, headers=headers, json=data)
@@ -237,6 +237,8 @@ def process_message_background(user_phone, user_message):
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     data = request.get_json()
+    logger.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+    
     if 'entry' in data:
         for entry in data['entry']:
             for change in entry['changes']:
@@ -245,6 +247,7 @@ def handle_webhook():
                         if message['type'] == 'text':
                             user_phone = message['from']
                             user_message = message['text']['body']
+                            logger.info(f"Processing message from {user_phone}: {user_message}")
                             thread = Thread(target=process_message_background, args=(user_phone, user_message))
                             thread.start()
     return "OK", 200
@@ -253,40 +256,7 @@ def handle_webhook():
 def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
-def broadcast_startup_message():
-    """Sends a startup message to all known users."""
-    try:
-        conn = sqlite3.connect('health_bot.db')
-        cursor = conn.cursor()
-        # Fetch all unique phone numbers from the user_profiles table
-        cursor.execute("SELECT phone FROM user_profiles")
-        users = cursor.fetchall()
-        conn.close()
-
-        if not users:
-            logger.info("No users found to broadcast startup message.")
-            return
-
-        startup_message = "Hello! The Health AI Chatbot is back online and ready to assist you. 🤖"
-        logger.info(f"Broadcasting startup message to {len(users)} user(s)...")
-
-        for user in users:
-            user_phone = user[0]
-            send_whatsapp_message(user_phone, startup_message)
-            time.sleep(1) # Add a 1-second delay to avoid rate limiting
-
-        logger.info("Startup broadcast complete.")
-    except Exception as e:
-        logger.error(f"Error during startup broadcast: {e}")
-
 if __name__ == '__main__':
     init_db()
-    
-    # Run the broadcast in a separate thread so it doesn't block the server from starting
-    # Note: When deploying with Gunicorn (like on Render), this __main__ block is not executed.
-    # This broadcast will only run when you start the app locally with `python app.py`.
-    broadcast_thread = Thread(target=broadcast_startup_message)
-    broadcast_thread.start()
-    
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
