@@ -106,6 +106,39 @@ def save_conversation(user_phone, message, response, language='en'):
     except Exception as e:
         logger.error(f"Error saving conversation: {e}")
 
+def get_recent_conversations(user_phone, limit=30):
+    """Retrieve recent conversations for a user, up to the specified limit."""
+    logger.info(f"Retrieving up to {limit} recent conversations for user {user_phone}...")
+    try:
+        conn = sqlite3.connect('health_bot.db')
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT message, response, timestamp, language
+            FROM conversations
+            WHERE user_phone = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (user_phone, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Convert to list of dictionaries
+        conversations = [
+            {
+                "message": row[0],
+                "response": row[1],
+                "timestamp": row[2],
+                "language": row[3]
+            }
+            for row in rows
+        ]
+        
+        logger.info(f"Retrieved {len(conversations)} conversations for user {user_phone}.")
+        return conversations
+    except Exception as e:
+        logger.error(f"Error retrieving conversations: {e}")
+        return []
+
 # --- Language and AI Functions ---
 def translate_with_gemini(text, target_lang):
     """Detects source language and translates text using Gemini, returning a dictionary."""
@@ -127,11 +160,13 @@ def translate_with_gemini(text, target_lang):
         logger.error(f"Gemini translation/detection failed: {e}. Defaulting to English.")
         return {"detected_language": "en", "translated_text": text}
 
-def get_gemini_response(prompt, model_name='gemini-2.5-flash'):
+def get_gemini_response(prompt, model_name='gemini-2.5-flash', conversation_history=None):
     if not gemini_model: return "AI service is not configured."
     logger.info(f"Getting response from Gemini model: {model_name}...")
     try:
         model = genai.GenerativeModel(model_name)
+        
+        # Build context with conversation history if available
         context = """
         You are Dr. AI, an AI Health Advisor with the persona of an experienced, empathetic, and professional doctor.
         Your communication must be:
@@ -141,6 +176,17 @@ def get_gemini_response(prompt, model_name='gemini-2.5-flash'):
         4.  **Reassuring but Professional:** Maintain a tone that is both comforting and authoritative.
         5.  **Disclaimer-First:** This is not a substitute for professional medical advice. Always encourage users to consult a real doctor for any health concerns.
         """
+        
+        # Add conversation history to context if provided
+        if conversation_history:
+            history_text = "\n\nConversation History:\n"
+            for i, conv in enumerate(conversation_history):
+                history_text += f"User: {conv['message']}\n"
+                history_text += f"Dr. AI: {conv['response']}\n"
+                if i >= 5:  # Limit history to last 5 exchanges to avoid token limits
+                    break
+            context += history_text
+        
         response = model.generate_content(f"{context}\n\nHere is the user's question: {prompt}\n\nYour response:")
         logger.info(f"Successfully received response from {model_name}.")
         return response.text
@@ -154,7 +200,7 @@ def get_perplexity_search(query):
     try:
         response = requests.post("https://api.perplexity.ai/chat/completions",
             headers={"Authorization": f"Bearer {Config.PERPLEXITY_API_KEY}"},
-            json={"model": "llama-3-sonar-large-32k-online", "messages": [
+            json={"model": "sonar", "messages": [
                 {"role": "system", "content": "You are a health information search expert. Find the most relevant, recent, and reliable medical information for the user's query."},
                 {"role": "user", "content": f"Search for: {query}"}
             ]})
@@ -169,7 +215,7 @@ def get_perplexity_search(query):
 
 def get_groq_summary(text):
     if not groq_client: return None
-    model_to_use = "llama3-70b-8192"
+    model_to_use = "gpt-oss-120b"
     logger.info(f"Summarizing text with Groq model {model_to_use}...")
     try:
         completion = groq_client.chat.completions.create(model=model_to_use,
@@ -194,7 +240,7 @@ def determine_response_strategy(message):
     logger.info(f"Determined response strategy: '{strategy}'")
     return strategy
 
-def process_health_query(message_in_english):
+def process_health_query(message_in_english, user_phone=None, conversation_history=None):
     strategy = determine_response_strategy(message_in_english)
     
     response = ""
@@ -204,13 +250,13 @@ def process_health_query(message_in_english):
         search_result = get_perplexity_search(message_in_english)
         if search_result:
             gemini_prompt = f"Based on this recent health information: {search_result}\n\nUser question: {message_in_english}"
-            gemini_response = get_gemini_response(gemini_prompt)
+            gemini_response = get_gemini_response(gemini_prompt, conversation_history=conversation_history)
             response = get_groq_summary(gemini_response) or gemini_response
         else:
             logger.warning("Perplexity search failed. Falling back to Gemini directly.")
-            response = get_gemini_response(message_in_english)
+            response = get_gemini_response(message_in_english, conversation_history=conversation_history)
     else: # reason_only
-        gemini_response = get_gemini_response(message_in_english)
+        gemini_response = get_gemini_response(message_in_english, conversation_history=conversation_history)
         response = get_groq_summary(gemini_response) or gemini_response
         
     logger.info(f"Generated final response for user in English.")
@@ -236,24 +282,27 @@ def send_whatsapp_message(to_phone, message_body):
 def process_message_background(user_phone, user_message):
     logger.info(f"Starting background processing for user {user_phone}.")
     try:
-        # 1. Translate user message to English and detect their language
+        # 1. Get recent conversation history
+        conversation_history = get_recent_conversations(user_phone, limit=30)
+        
+        # 2. Translate user message to English and detect their language
         translation_result = translate_with_gemini(user_message, "English")
         english_message = translation_result['translated_text']
         user_lang = translation_result['detected_language']
         logger.info(f"User language is '{user_lang}', translated message is '{english_message}'")
 
-        # 2. Process the query in English to get the core response
-        response_in_english = process_health_query(english_message)
+        # 3. Process the query in English to get the core response, using conversation history
+        response_in_english = process_health_query(english_message, user_phone, conversation_history)
 
-        # 3. Add disclaimer
+        # 4. Add disclaimer
         disclaimer = "\n\n---\n*This is not a substitute for professional medical advice. Please consult a doctor for any health concerns.*"
         full_response_in_english = response_in_english + disclaimer
 
-        # 4. Translate the full response back to the user's language
+        # 5. Translate the full response back to the user's language
         final_translation_result = translate_with_gemini(full_response_in_english, user_lang)
         final_response = final_translation_result['translated_text']
         
-        # 5. Send and save
+        # 6. Send and save
         if send_whatsapp_message(user_phone, final_response):
             save_conversation(user_phone, user_message, final_response, user_lang)
         else:
