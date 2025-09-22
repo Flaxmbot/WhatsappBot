@@ -6,14 +6,9 @@ from flask import Flask, request, jsonify
 import requests
 import google.generativeai as genai
 from groq import Groq
-import asyncio
-import aiohttp
 from deep_translator import GoogleTranslator
-import re
-from werkzeug.security import generate_password_hash
 import sqlite3
 from threading import Thread
-import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,21 +18,13 @@ app = Flask(__name__)
 
 # Configuration
 class Config:
-    # WhatsApp Business API
     WHATSAPP_TOKEN = os.environ.get('WHATSAPP_TOKEN')
     WHATSAPP_PHONE_NUMBER_ID = os.environ.get('WHATSAPP_PHONE_NUMBER_ID')
-    WHATSAPP_BUSINESS_ACCOUNT_ID = os.environ.get('WHATSAPP_BUSINESS_ACCOUNT_ID')
     VERIFY_TOKEN = os.environ.get('VERIFY_TOKEN', 'health_bot_verify_token_2024')
-    
-    # AI API Keys
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
     GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
     PERPLEXITY_API_KEY = os.environ.get('PERPLEXITY_API_KEY')
-    
-    # Database
     DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///health_bot.db')
-    
-    # App settings
     SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 app.config.from_object(Config)
@@ -94,10 +81,7 @@ def init_db():
 # Language detection and translation functions
 def detect_language(text):
     try:
-        detected = GoogleTranslator().detect(text)
-        if detected and len(detected) > 0:
-            return detected[0][1]
-        return 'en'
+        return GoogleTranslator().detect(text)[0]
     except Exception as e:
         logger.error(f"Language detection error: {e}")
         return 'en'
@@ -112,210 +96,112 @@ def translate_text(text, target_lang='en', source_lang='auto'):
         return text
 
 # AI Service Functions
-async def get_gemini_response(prompt, context="health"):
+def get_gemini_response(prompt):
     if not gemini_model:
-        logger.error("GEMINI_API_KEY not configured.")
-        return "The AI service is not configured. Please contact the administrator."
+        return "The AI service is not configured."
     try:
-        health_context = """
-        You are a helpful AI health assistant. Provide accurate, helpful health information while:
-        1. Never replacing professional medical advice
-        2. Encouraging users to consult healthcare providers for serious concerns
-        3. Providing general wellness tips and health information
-        4. Being empathetic and supportive
-        5. Keeping responses concise but informative
-        6. Always disclaiming that this is not medical advice
-        """
-        
+        health_context = "You are a helpful AI health assistant. Provide accurate, helpful health information, but always include a disclaimer that you are not a medical professional and users should consult a doctor for medical advice."
         full_prompt = f"{health_context}\n\nUser question: {prompt}\n\nResponse:"
-        
         response = gemini_model.generate_content(full_prompt)
         return response.text
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
-        return "I'm having trouble processing your request right now. Please try again later."
+        return "I'm having trouble processing your request right now."
 
-async def get_perplexity_search(query):
+def get_perplexity_search(query):
     if not Config.PERPLEXITY_API_KEY:
-        logger.error("PERPLEXITY_API_KEY not configured.")
         return None
     try:
         url = "https://api.perplexity.ai/chat/completions"
-        
         payload = {
             "model": "llama-3.1-sonar-small-128k-online",
             "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful health information assistant. Search for current, accurate health information and provide concise, helpful responses with sources when possible."
-                },
-                {
-                    "role": "user",
-                    "content": f"Search for recent, reliable information about: {query}"
-                }
-            ],
-            "max_tokens": 300,
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "search_domain_filter": ["pubmed.ncbi.nlm.nih.gov", "mayoclinic.org", "who.int", "cdc.gov", "nih.gov"]
+                {"role": "system", "content": "You are a helpful health information assistant."},
+                {"role": "user", "content": f"Search for recent, reliable information about: {query}"}
+            ]
         }
-        
         headers = {
             "Authorization": f"Bearer {Config.PERPLEXITY_API_KEY}",
             "Content-Type": "application/json"
         }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data['choices'][0]['message']['content']
-                else:
-                    logger.error(f"Perplexity API error: {response.status}")
-                    return None
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+        else:
+            logger.error(f"Perplexity API error: {response.status_code}")
+            return None
     except Exception as e:
         logger.error(f"Perplexity search error: {e}")
         return None
 
 def get_groq_summary(text):
     if not groq_client:
-        logger.error("GROQ_API_KEY not configured.")
-        return text[:200] + "..." if len(text) > 200 else text
+        return text
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a text summarizer. Create a concise, clear summary of health-related content in 2-3 sentences maximum. Focus on key actionable information."
-                },
-                {
-                    "role": "user",
-                    "content": f"Summarize this health information concisely: {text}"
-                }
+                {"role": "system", "content": "Summarize this health information concisely."},
+                {"role": "user", "content": text}
             ],
             model="llama-3.1-70b-versatile",
-            temperature=0.3,
-            max_tokens=150,
-            top_p=1,
         )
-        
         return chat_completion.choices[0].message.content
     except Exception as e:
         logger.error(f"Groq API error: {e}")
-        return text[:200] + "..." if len(text) > 200 else text
-
+        return text
 
 # Health-specific response logic
 def determine_response_strategy(message):
     message_lower = message.lower()
-    
-    # Emergency keywords
-    emergency_keywords = ['emergency', 'urgent', 'chest pain', 'heart attack', 'stroke', 'bleeding', 'unconscious', 'breathing problem']
-    if any(keyword in message_lower for keyword in emergency_keywords):
+    if any(keyword in message_lower for keyword in ['emergency', 'chest pain', 'heart attack', 'stroke']):
         return 'emergency'
-    
-    # Search-worthy queries (current info, specific conditions)
-    search_keywords = ['latest', 'recent', 'new treatment', 'current research', 'news', 'study', 'breakthrough']
-    if any(keyword in message_lower for keyword in search_keywords):
+    if any(keyword in message_lower for keyword in ['latest', 'recent', 'new treatment']):
         return 'search_and_reason'
-    
-    # Simple health queries
-    health_keywords = ['symptom', 'pain', 'treatment', 'medication', 'exercise', 'diet', 'nutrition', 'wellness']
-    if any(keyword in message_lower for keyword in health_keywords):
-        return 'reason_only'
-    
-    return 'general'
+    return 'reason_only'
 
-async def process_health_query(message, user_lang='en'):
+def process_health_query(message, user_lang='en'):
     strategy = determine_response_strategy(message)
-    
-    # Translate to English if needed
     english_message = translate_text(message, 'en', user_lang) if user_lang != 'en' else message
     
     if strategy == 'emergency':
-        response = """🚨 MEDICAL EMERGENCY DETECTED 🚨
-
-If this is a medical emergency:
-• Call your local emergency number immediately (911, 102, etc.)
-• Go to the nearest emergency room
-• Contact emergency services
-
-I cannot provide emergency medical care. Please seek immediate professional help."""
-        
+        response = "If this is a medical emergency, please call your local emergency number immediately. I cannot provide emergency medical care."
     elif strategy == 'search_and_reason':
-        # First search for current info
-        search_result = await get_perplexity_search(english_message)
+        search_result = get_perplexity_search(english_message)
         if search_result:
-            # Then reason about it with Gemini
-            reasoning_prompt = f"Based on this recent health information: {search_result}\n\nUser question: {english_message}\n\nProvide helpful guidance:"
-            gemini_response = await get_gemini_response(reasoning_prompt)
-            # Summarize with Groq
-            response = get_groq_summary(f"{gemini_response}\n\nRecent info: {search_result}")
+            gemini_response = get_gemini_response(f"Based on this recent health information: {search_result}\n\nUser question: {english_message}")
+            response = get_groq_summary(gemini_response)
         else:
-            response = await get_gemini_response(english_message)
-            
-    elif strategy == 'reason_only':
-        gemini_response = await get_gemini_response(english_message)
+            response = get_gemini_response(english_message)
+    else:
+        gemini_response = get_gemini_response(english_message)
         response = get_groq_summary(gemini_response)
         
-    else:
-        response = await get_gemini_response(english_message)
-    
-    # Translate back to user's language if needed
-    if user_lang != 'en':
-        response = translate_text(response, user_lang, 'en')
-    
-    return response
+    return translate_text(response, user_lang, 'en') if user_lang != 'en' else response
 
 # WhatsApp API functions
 def send_whatsapp_message(to_phone, message):
     try:
         url = f"https://graph.facebook.com/v18.0/{Config.WHATSAPP_PHONE_NUMBER_ID}/messages"
-        
-        headers = {
-            "Authorization": f"Bearer {Config.WHATSAPP_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "messaging_product": "whatsapp",
-            "to": to_phone,
-            "type": "text",
-            "text": {"body": message}
-        }
-        
+        headers = {"Authorization": f"Bearer {Config.WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+        data = {"messaging_product": "whatsapp", "to": to_phone, "type": "text", "text": {"body": message}}
         response = requests.post(url, headers=headers, json=data)
-        
         if response.status_code == 200:
-            logger.info(f"Message sent successfully to {to_phone}")
+            logger.info(f"Message sent to {to_phone}")
             return True
         else:
-            logger.error(f"Failed to send message: {response.status_code} - {response.text}")
+            logger.error(f"Failed to send message: {response.text}")
             return False
-            
     except Exception as e:
         logger.error(f"Error sending WhatsApp message: {e}")
         return False
 
-def save_conversation(user_phone, message, response, language='en', ai_service='gemini'):
+def save_conversation(user_phone, message, response, language='en'):
     try:
         conn = sqlite3.connect('health_bot.db')
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO conversations (user_phone, message, response, language, ai_service)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_phone, message, response, language, ai_service))
-        
-        # Update user last active
-        cursor.execute('''
-            INSERT OR REPLACE INTO user_profiles (phone, last_active)
-            VALUES (?, ?)
-        ''', (user_phone, datetime.now()))
-        
+        cursor.execute("INSERT INTO conversations (user_phone, message, response, language) VALUES (?, ?, ?, ?)", (user_phone, message, response, language))
         conn.commit()
         conn.close()
-        logger.info(f"Conversation saved for {user_phone}")
     except Exception as e:
         logger.error(f"Error saving conversation: {e}")
 
@@ -326,112 +212,38 @@ def verify_webhook():
     token = request.args.get('hub.verify_token')
     challenge = request.args.get('hub.challenge')
     
-    if mode and token:
-        if mode == 'subscribe' and token == Config.VERIFY_TOKEN:
-            logger.info("Webhook verified successfully")
-            return challenge
-        else:
-            logger.error("Webhook verification failed")
-            return "Verification token mismatch", 403
+    if mode == 'subscribe' and token == Config.VERIFY_TOKEN:
+        return challenge
+    else:
+        return "Verification token mismatch", 403
+
+def process_message_background(user_phone, user_message):
+    user_lang = detect_language(user_message)
+    response = process_health_query(user_message, user_lang)
+    disclaimer = "\n\n⚠️ This is not medical advice. Please consult a healthcare professional for medical concerns."
+    final_response = response + translate_text(disclaimer, user_lang, 'en')
     
-    return "Missing parameters", 400
+    if send_whatsapp_message(user_phone, final_response):
+        save_conversation(user_phone, user_message, final_response, user_lang)
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
-    try:
-        data = request.get_json()
-        
-        if 'entry' in data:
-            for entry in data['entry']:
-                if 'changes' in entry:
-                    for change in entry['changes']:
-                        if change['field'] == 'messages':
-                            value = change['value']
-                            
-                            if 'messages' in value:
-                                for message in value['messages']:
-                                    if message['type'] == 'text':
-                                        user_phone = message['from']
-                                        user_message = message['text']['body']
-                                        
-                                        # Process message in background
-                                        thread = Thread(target=process_message_background, 
-                                                      args=(user_phone, user_message))
-                                        thread.start()
-        
-        return "OK", 200
-        
-    except Exception as e:
-        logger.error(f"Error handling webhook: {e}")
-        return "Error", 500
-
-def process_message_background(user_phone, user_message):
-    try:
-        # Detect language
-        user_lang = detect_language(user_message)
-        
-        # Process the health query
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        response = loop.run_until_complete(process_health_query(user_message, user_lang))
-        loop.close()
-        
-        # Add disclaimer
-        disclaimer = "\n\n⚠️ This is not medical advice. Please consult a healthcare professional for medical concerns."
-        if user_lang != 'en':
-            disclaimer = translate_text(disclaimer, user_lang, 'en')
-        
-        final_response = response + disclaimer
-        
-        # Send response
-        if send_whatsapp_message(user_phone, final_response):
-            save_conversation(user_phone, user_message, final_response, user_lang)
-        
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        error_message = "Sorry, I'm having technical difficulties. Please try again later."
-        send_whatsapp_message(user_phone, error_message)
+    data = request.get_json()
+    if 'entry' in data:
+        for entry in data['entry']:
+            for change in entry['changes']:
+                if change['field'] == 'messages':
+                    for message in change['value']['messages']:
+                        if message['type'] == 'text':
+                            user_phone = message['from']
+                            user_message = message['text']['body']
+                            thread = Thread(target=process_message_background, args=(user_phone, user_message))
+                            thread.start()
+    return "OK", 200
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "services": {
-            "whatsapp": bool(Config.WHATSAPP_TOKEN),
-            "gemini": bool(Config.GEMINI_API_KEY),
-            "groq": bool(Config.GROQ_API_KEY),
-            "perplexity": bool(Config.PERPLEXITY_API_KEY)
-        }
-    })
-
-@app.route('/stats', methods=['GET'])
-def get_stats():
-    try:
-        conn = sqlite3.connect('health_bot.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT COUNT(*) FROM conversations')
-        total_conversations = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(DISTINCT user_phone) FROM conversations')
-        unique_users = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT language, COUNT(*) FROM conversations GROUP BY language')
-        language_stats = dict(cursor.fetchall())
-        
-        conn.close()
-        
-        return jsonify({
-            "total_conversations": total_conversations,
-            "unique_users": unique_users,
-            "language_distribution": language_stats,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        return jsonify({"error": "Unable to fetch stats"}), 500
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 if __name__ == '__main__':
     init_db()
