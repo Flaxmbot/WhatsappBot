@@ -325,24 +325,58 @@ def send_whatsapp_message(to_phone, message_body):
         logger.error("Cannot send message, Twilio client not initialized.")
         return False
     
-    # Truncate message if it exceeds Twilio's limit for WhatsApp (4096 characters)
-    max_length = 4000
-    if len(message_body) > max_length:
-        message_body = message_body[:max_length-3] + "..."
-        logger.info(f"Message truncated to {max_length} characters to comply with Twilio limits.")
+    # Split message into parts if it exceeds Twilio's limit for WhatsApp (1600 characters)
+    max_length = 1600
     
-    logger.info(f"Attempting to send message to {to_phone} via Twilio...")
-    try:
-        message = twilio_client.messages.create(
-            from_=Config.TWILIO_PHONE_NUMBER,
-            body=message_body,
-            to=to_phone
-        )
-        logger.info(f"Message sent successfully to {to_phone} (SID: {message.sid})")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send Twilio message: {e}")
-        return False
+    # If message is within limit, send as is
+    if len(message_body) <= max_length:
+        logger.info(f"Attempting to send message to {to_phone} via Twilio...")
+        try:
+            message = twilio_client.messages.create(
+                from_=Config.TWILIO_PHONE_NUMBER,
+                body=message_body,
+                to=to_phone
+            )
+            logger.info(f"Message sent successfully to {to_phone} (SID: {message.sid})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send Twilio message: {e}")
+            return False
+    
+    # If message exceeds limit, split into parts
+    logger.info(f"Message length {len(message_body)} exceeds limit. Splitting into parts...")
+    
+    # Split message into chunks
+    chunk_size = 1500
+    chunks = [message_body[i:i+chunk_size] for i in range(0, len(message_body), chunk_size)]
+    total_parts = len(chunks)
+    
+    logger.info(f"Split message into {total_parts} parts.")
+    
+    # Send each part
+    success_count = 0
+    for i, chunk in enumerate(chunks):
+        part_number = i + 1
+        
+        logger.info(f"Sending part {part_number} of {total_parts} to {to_phone}...")
+        try:
+            message = twilio_client.messages.create(
+                from_=Config.TWILIO_PHONE_NUMBER,
+                body=chunk,
+                to=to_phone
+            )
+            logger.info(f"Part {part_number} sent successfully to {to_phone} (SID: {message.sid})")
+            success_count += 1
+            
+            # Add a small delay between parts to help ensure order
+            import time
+            if part_number < total_parts:
+                time.sleep(1)
+        except Exception as e:
+            logger.error(f"Failed to send part {part_number} of Twilio message: {e}")
+    
+    # Return True only if all parts were sent successfully
+    return success_count == total_parts
 
 def process_message_background(user_phone, user_message):
     logger.info(f"Starting background processing for user {user_phone}.")
