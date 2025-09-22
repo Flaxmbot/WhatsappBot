@@ -11,8 +11,11 @@ import sqlite3
 from threading import Thread
 from twilio.rest import Client
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to be detailed
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -34,12 +37,17 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 app.config.from_object(Config)
+logger.info("Configuration loaded.")
 
 # --- Initialize Clients ---
 # Initialize Twilio Client
 twilio_client = None
 if Config.TWILIO_ACCOUNT_SID and Config.TWILIO_AUTH_TOKEN:
-    twilio_client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+    try:
+        twilio_client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+        logger.info("Twilio client initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize Twilio client: {e}")
 else:
     logger.warning("Twilio credentials not set. WhatsApp features will be disabled.")
 
@@ -50,13 +58,21 @@ try:
     if Config.GEMINI_API_KEY:
         genai.configure(api_key=Config.GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+        logger.info("Gemini client initialized successfully.")
+    else:
+        logger.warning("GEMINI_API_KEY not set. Gemini features will be disabled.")
+
     if Config.GROQ_API_KEY:
         groq_client = Groq(api_key=Config.GROQ_API_KEY)
+        logger.info("Groq client initialized successfully.")
+    else:
+        logger.warning("GROQ_API_KEY not set. Groq features will be disabled.")
 except Exception as e:
     logger.error(f"Error initializing AI clients: {e}")
 
 # --- Database Functions ---
 def init_db():
+    logger.info("Initializing database...")
     conn = sqlite3.connect('health_bot.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -76,8 +92,10 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    logger.info("Database initialized successfully.")
 
 def save_conversation(user_phone, message, response, language='en'):
+    logger.info(f"Saving conversation for user {user_phone}...")
     try:
         conn = sqlite3.connect('health_bot.db')
         cursor = conn.cursor()
@@ -87,26 +105,39 @@ def save_conversation(user_phone, message, response, language='en'):
         cursor.execute("UPDATE user_profiles SET last_active = ? WHERE phone = ?", (datetime.now(), user_phone))
         conn.commit()
         conn.close()
+        logger.info(f"Conversation for {user_phone} saved successfully.")
     except Exception as e:
         logger.error(f"Error saving conversation: {e}")
 
 # --- Language and AI Functions ---
 def detect_language(text):
+    logger.info(f"Detecting language for: '{text[:50]}...'")
     try:
-        return GoogleTranslator().detect(text)[0]
-    except Exception: return 'en'
+        lang = GoogleTranslator().detect(text)[0]
+        logger.info(f"Detected language: {lang}")
+        return lang
+    except Exception as e:
+        logger.error(f"Language detection failed: {e}. Defaulting to 'en'.")
+        return 'en'
 
 def translate_text(text, target_lang='en', source_lang='auto'):
     if target_lang == source_lang: return text
+    logger.info(f"Translating text from '{source_lang}' to '{target_lang}'...")
     try:
-        return GoogleTranslator(source=source_lang, target=target_lang).translate(text)
-    except Exception: return text
+        translated_text = GoogleTranslator(source=source_lang, target=target_lang).translate(text)
+        logger.info("Translation successful.")
+        return translated_text
+    except Exception as e:
+        logger.error(f"Translation failed: {e}. Returning original text.")
+        return text
 
 def get_gemini_response(prompt):
     if not gemini_model: return "AI service is not configured."
+    logger.info("Getting response from Gemini...")
     try:
         context = "You are a helpful AI health assistant. Provide accurate, helpful health information, but always include a disclaimer that you are not a medical professional and users should consult a doctor for medical advice."
         response = gemini_model.generate_content(f"{context}\n\nUser question: {prompt}\n\nResponse:")
+        logger.info("Successfully received response from Gemini.")
         return response.text
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
@@ -114,6 +145,7 @@ def get_gemini_response(prompt):
 
 def get_perplexity_search(query):
     if not Config.PERPLEXITY_API_KEY: return None
+    logger.info(f"Searching Perplexity for: '{query}'")
     try:
         response = requests.post("https://api.perplexity.ai/chat/completions",
             headers={"Authorization": f"Bearer {Config.PERPLEXITY_API_KEY}"},
@@ -122,19 +154,24 @@ def get_perplexity_search(query):
                 {"role": "user", "content": f"Search for recent, reliable information about: {query}"}
             ]})
         if response.status_code == 200:
+            logger.info("Perplexity search successful.")
             return response.json()['choices'][0]['message']['content']
+        else:
+            logger.error(f"Perplexity API returned status {response.status_code}: {response.text}")
     except Exception as e:
         logger.error(f"Perplexity search error: {e}")
     return None
 
 def get_groq_summary(text):
     if not groq_client: return text
+    logger.info("Summarizing text with Groq...")
     try:
         completion = groq_client.chat.completions.create(model="llama3-70b-8192",
             messages=[
                 {"role": "system", "content": "Summarize this health information concisely."},
                 {"role": "user", "content": text}
             ])
+        logger.info("Groq summary successful.")
         return completion.choices[0].message.content
     except Exception as e:
         logger.error(f"Groq API error: {e}")
@@ -143,14 +180,19 @@ def get_groq_summary(text):
 # --- Core Bot Logic ---
 def determine_response_strategy(message):
     message_lower = message.lower()
-    if any(k in message_lower for k in ['emergency', 'chest pain', 'heart attack', 'stroke']): return 'emergency'
-    if any(k in message_lower for k in ['latest', 'recent', 'new treatment']): return 'search_and_reason'
-    return 'reason_only'
+    strategy = 'reason_only' # Default strategy
+    if any(k in message_lower for k in ['emergency', 'chest pain', 'heart attack', 'stroke']):
+        strategy = 'emergency'
+    elif any(k in message_lower for k in ['latest', 'recent', 'new treatment']):
+        strategy = 'search_and_reason'
+    logger.info(f"Determined response strategy: '{strategy}'")
+    return strategy
 
 def process_health_query(message, user_lang='en'):
     strategy = determine_response_strategy(message)
     english_message = translate_text(message, 'en', user_lang)
     
+    response = ""
     if strategy == 'emergency':
         response = "If this is a medical emergency, please call your local emergency number immediately. I cannot provide emergency medical care."
     elif strategy == 'search_and_reason':
@@ -160,50 +202,62 @@ def process_health_query(message, user_lang='en'):
     else: # reason_only
         response = get_groq_summary(get_gemini_response(english_message))
         
-    return translate_text(response, user_lang, 'en')
+    final_response = translate_text(response, user_lang, 'en')
+    logger.info(f"Generated final response for user.")
+    return final_response
 
 def send_whatsapp_message(to_phone, message_body):
     if not twilio_client:
-        logger.error("Twilio client not initialized.")
+        logger.error("Cannot send message, Twilio client not initialized.")
         return False
+    logger.info(f"Attempting to send message to {to_phone} via Twilio...")
     try:
         message = twilio_client.messages.create(
             from_=Config.TWILIO_PHONE_NUMBER,
             body=message_body,
             to=to_phone
         )
-        logger.info(f"Message sent to {to_phone} (SID: {message.sid})")
+        logger.info(f"Message sent successfully to {to_phone} (SID: {message.sid})")
         return True
     except Exception as e:
         logger.error(f"Failed to send Twilio message: {e}")
         return False
 
 def process_message_background(user_phone, user_message):
-    user_lang = detect_language(user_message)
-    response = process_health_query(user_message, user_lang)
-    disclaimer = "\n\n⚠️ This is not medical advice. Please consult a healthcare professional."
-    final_response = response + translate_text(disclaimer, user_lang, 'en')
-    
-    if send_whatsapp_message(user_phone, final_response):
-        save_conversation(user_phone, user_message, final_response, user_lang)
+    logger.info(f"Starting background processing for user {user_phone}.")
+    try:
+        user_lang = detect_language(user_message)
+        response = process_health_query(user_message, user_lang)
+        disclaimer = "\n\n⚠️ This is not medical advice. Please consult a healthcare professional."
+        final_response = response + translate_text(disclaimer, user_lang, 'en')
+        
+        if send_whatsapp_message(user_phone, final_response):
+            save_conversation(user_phone, user_message, final_response, user_lang)
+        else:
+            logger.error(f"Failed to send final response to {user_phone}.")
+    except Exception as e:
+        logger.error(f"Unhandled exception in background processor: {e}")
+    logger.info(f"Finished background processing for {user_phone}.")
 
 # --- Flask Routes ---
 @app.route('/twilio/webhook', methods=['POST'])
 def handle_twilio_webhook():
     """Handles incoming messages from Twilio."""
+    logger.info("Received request on /twilio/webhook")
     try:
         data = request.values
         user_message = data.get('Body', '').strip()
         user_phone = data.get('From', '')
         
-        logger.info(f"Received message from {user_phone}: '{user_message}'")
+        logger.info(f"Parsed message from {user_phone}: '{user_message}'")
         
         if user_message and user_phone:
             thread = Thread(target=process_message_background, args=(user_phone, user_message))
             thread.start()
+            logger.info(f"Started background thread for {user_phone}.")
             
     except Exception as e:
-        logger.error(f"Error in Twilio webhook: {e}")
+        logger.error(f"Error in Twilio webhook handler: {e}")
         
     return ('', 204) # Return a 204 No Content to acknowledge receipt
 
@@ -212,6 +266,8 @@ def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 if __name__ == '__main__':
+    logger.info("Starting Flask application...")
     init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
