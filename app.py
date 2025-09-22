@@ -43,9 +43,22 @@ class Config:
 app.config.from_object(Config)
 
 # Initialize AI clients
-genai.configure(api_key=Config.GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-groq_client = Groq(api_key=Config.GROQ_API_KEY)
+gemini_model = None
+groq_client = None
+
+try:
+    if Config.GEMINI_API_KEY:
+        genai.configure(api_key=Config.GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    else:
+        logger.warning("GEMINI_API_KEY not set. Gemini features will be disabled.")
+
+    if Config.GROQ_API_KEY:
+        groq_client = Groq(api_key=Config.GROQ_API_KEY)
+    else:
+        logger.warning("GROQ_API_KEY not set. Groq features will be disabled.")
+except Exception as e:
+    logger.error(f"Error initializing AI clients: {e}")
 
 # Initialize database
 def init_db():
@@ -100,6 +113,9 @@ def translate_text(text, target_lang='en', source_lang='auto'):
 
 # AI Service Functions
 async def get_gemini_response(prompt, context="health"):
+    if not gemini_model:
+        logger.error("GEMINI_API_KEY not configured.")
+        return "The AI service is not configured. Please contact the administrator."
     try:
         health_context = """
         You are a helpful AI health assistant. Provide accurate, helpful health information while:
@@ -120,6 +136,9 @@ async def get_gemini_response(prompt, context="health"):
         return "I'm having trouble processing your request right now. Please try again later."
 
 async def get_perplexity_search(query):
+    if not Config.PERPLEXITY_API_KEY:
+        logger.error("PERPLEXITY_API_KEY not configured.")
+        return None
     try:
         url = "https://api.perplexity.ai/chat/completions"
         
@@ -159,6 +178,9 @@ async def get_perplexity_search(query):
         return None
 
 def get_groq_summary(text):
+    if not groq_client:
+        logger.error("GROQ_API_KEY not configured.")
+        return text[:200] + "..." if len(text) > 200 else text
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[
@@ -181,6 +203,7 @@ def get_groq_summary(text):
     except Exception as e:
         logger.error(f"Groq API error: {e}")
         return text[:200] + "..." if len(text) > 200 else text
+
 
 # Health-specific response logic
 def determine_response_strategy(message):
