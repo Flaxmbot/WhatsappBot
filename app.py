@@ -40,7 +40,6 @@ app.config.from_object(Config)
 logger.info("Configuration loaded.")
 
 # --- Initialize Clients ---
-# Initialize Twilio Client
 twilio_client = None
 if Config.TWILIO_ACCOUNT_SID and Config.TWILIO_AUTH_TOKEN:
     try:
@@ -51,14 +50,13 @@ if Config.TWILIO_ACCOUNT_SID and Config.TWILIO_AUTH_TOKEN:
 else:
     logger.warning("Twilio credentials not set. WhatsApp features will be disabled.")
 
-# Initialize AI clients
 gemini_model = None
 groq_client = None
 try:
     if Config.GEMINI_API_KEY:
         genai.configure(api_key=Config.GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-2.5-pro')
-        logger.info("Gemini client initialized successfully.")
+        gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        logger.info("Gemini client initialized successfully with gemini-2.5-flash.")
     else:
         logger.warning("GEMINI_API_KEY not set. Gemini features will be disabled.")
 
@@ -131,21 +129,22 @@ def translate_text(text, target_lang='en', source_lang='auto'):
         logger.error(f"Translation failed: {e}. Returning original text.")
         return text
 
-def get_gemini_response(prompt):
+def get_gemini_response(prompt, model_name='gemini-2.5-flash'):
     if not gemini_model: return "AI service is not configured."
-    logger.info("Getting response from Gemini...")
+    logger.info(f"Getting response from Gemini model: {model_name}...")
     try:
+        model = genai.GenerativeModel(model_name)
         context = "You are a helpful AI health assistant. Provide accurate, helpful health information, but always include a disclaimer that you are not a medical professional and users should consult a doctor for medical advice."
-        response = gemini_model.generate_content(f"{context}\n\nUser question: {prompt}\n\nResponse:")
-        logger.info("Successfully received response from Gemini.")
+        response = model.generate_content(f"{context}\n\nUser question: {prompt}\n\nResponse:")
+        logger.info(f"Successfully received response from {model_name}.")
         return response.text
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return "I'm having trouble processing your request right now."
+        logger.error(f"Gemini API error with model {model_name}: {e}")
+        return None
 
 def get_perplexity_search(query):
     if not Config.PERPLEXITY_API_KEY: return None
-    logger.info(f"Searching Perplexity for: '{query}'")
+    logger.info(f"Searching Perplexity (sonar) for: '{query}'")
     try:
         response = requests.post("https://api.perplexity.ai/chat/completions",
             headers={"Authorization": f"Bearer {Config.PERPLEXITY_API_KEY}"},
@@ -163,10 +162,13 @@ def get_perplexity_search(query):
     return None
 
 def get_groq_summary(text):
-    if not groq_client: return text
-    logger.info("Summarizing text with Groq...")
+    if not groq_client: return None
+    # Note: As of late 2025, Groq does not have a model named 'gpt-oss-120b'. 
+    # Using a powerful available alternative: llama3-70b-8192.
+    model_to_use = "llama3-70b-8192"
+    logger.info(f"Summarizing text with Groq model {model_to_use}...")
     try:
-        completion = groq_client.chat.completions.create(model="llama3-70b-8192",
+        completion = groq_client.chat.completions.create(model=model_to_use,
             messages=[
                 {"role": "system", "content": "Summarize this health information concisely."},
                 {"role": "user", "content": text}
@@ -175,7 +177,7 @@ def get_groq_summary(text):
         return completion.choices[0].message.content
     except Exception as e:
         logger.error(f"Groq API error: {e}")
-    return text
+    return None
 
 # --- Core Bot Logic ---
 def determine_response_strategy(message):
@@ -197,10 +199,18 @@ def process_health_query(message, user_lang='en'):
         response = "If this is a medical emergency, please call your local emergency number immediately. I cannot provide emergency medical care."
     elif strategy == 'search_and_reason':
         search_result = get_perplexity_search(english_message)
-        gemini_prompt = f"Based on this recent health information: {search_result}\n\nUser question: {english_message}" if search_result else english_message
-        response = get_groq_summary(get_gemini_response(gemini_prompt))
+        if search_result:
+            gemini_prompt = f"Based on this recent health information: {search_result}\n\nUser question: {english_message}"
+            gemini_response = get_gemini_response(gemini_prompt)
+            # Fallback to gemini if groq fails
+            response = get_groq_summary(gemini_response) or gemini_response
+        else:
+            logger.warning("Perplexity search failed. Falling back to Gemini directly.")
+            response = get_gemini_response(english_message)
     else: # reason_only
-        response = get_groq_summary(get_gemini_response(english_message))
+        gemini_response = get_gemini_response(english_message)
+        # Fallback to gemini if groq fails
+        response = get_groq_summary(gemini_response) or gemini_response
         
     final_response = translate_text(response, user_lang, 'en')
     logger.info(f"Generated final response for user.")
@@ -240,10 +250,10 @@ def process_message_background(user_phone, user_message):
     logger.info(f"Finished background processing for {user_phone}.")
 
 # --- Flask Routes ---
-@app.route('/twilio/webhook', methods=['POST'])
+@app.route('/webhook', methods=['POST'])
 def handle_twilio_webhook():
     """Handles incoming messages from Twilio."""
-    logger.info("Received request on /twilio/webhook")
+    logger.info("Received request on /webhook")
     try:
         data = request.values
         user_message = data.get('Body', '').strip()
@@ -270,4 +280,3 @@ if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
