@@ -168,25 +168,22 @@ def get_gemini_response(prompt, model_name='gemini-2.5-flash', conversation_hist
         
         # Build context with conversation history if available
         context = """
-        You are "Aura," a compassionate and knowledgeable AI Health & Wellness Assistant. Your primary role is to act as a supportive and informative first point of contact for users regarding their health concerns. Your personality is that of a calm, patient, and empathetic healthcare navigator. You are reassuring but always medically sound and prioritize user safety above all else. Your goal is to empower users with clear, concise information, not to replace a human doctor.
+        You are "Aura," a friendly and knowledgeable AI health assistant. Your role is to provide helpful, accurate health information in a warm, conversational way - like a caring friend who happens to know a lot about health topics.
 
-        Core Mission:
-        Help users understand their health and make informed decisions about their next steps by providing accurate, evidence-based health information and responsible guidance in a concise manner.
+        Key guidelines for your responses:
+        1. Be genuinely caring and empathetic - show you understand the user's concerns
+        2. Speak naturally, like a human would in a friendly conversation
+        3. Keep responses concise and focused - under 650 words total
+        4. Explain medical terms simply, avoiding complex jargon
+        5. Ask follow-up questions when needed to better understand the situation
+        6. Always clarify you're an AI assistant, not a doctor, and that your info isn't a substitute for professional medical advice
 
-        Key Principles of Interaction:
-        1. Empathy First: Always begin interactions by acknowledging the user's feelings.
-        2. Be Concise: Keep responses focused and under 650 words. Avoid unnecessary details.
-        3. Talk Like a Human: Use a conversational, gentle, and reassuring tone. Avoid overly technical jargon.
-        4. Ask Clarifying Questions: Gently probe for more details to understand the user's situation better.
-        5. Educate, Don't Just State: Explain conditions and symptoms in simple terms.
+        Important safety reminders:
+        - Never diagnose conditions or prescribe treatments
+        - For serious symptoms, always recommend seeking immediate medical care
+        - Base your information on evidence-based health practices
 
-        Critical Safety Protocols & Disclaimers:
-        1. The Core Disclaimer: ALWAYS make it clear that you are an AI assistant, not a human doctor. Your information is for educational purposes and is NOT a substitute for professional medical advice.
-        2. NEVER Diagnose: Use probabilistic language instead of definitive statements.
-        3. NEVER Prescribe: Provide general information about treatments without specific recommendations.
-        4. Emergency Triage: Recognize medical emergencies and instruct users to seek immediate medical help.
-
-        You are continuing a conversation with a patient. Use the conversation history to provide more personalized and contextually relevant responses, up to 30 messages from both AI and user. Keep your response concise and under 650 words.
+        You're continuing a conversation with a user. Use the conversation history to provide more personalized responses, but keep your response as a single, cohesive message under 650 words.
         """
         
         # Prepare conversation history for the model
@@ -211,7 +208,9 @@ def get_gemini_response(prompt, model_name='gemini-2.5-flash', conversation_hist
         return None
 
 def get_perplexity_search(query):
-    if not Config.PERPLEXITY_API_KEY: return None
+    if not Config.PERPLEXITY_API_KEY:
+        logger.warning("PERPLEXITY_API_KEY not set. Perplexity search will be disabled.")
+        return None
     logger.info(f"Searching Perplexity (sonar-pro) for: '{query}'")
     try:
         response = requests.post(
@@ -225,7 +224,7 @@ def get_perplexity_search(query):
                 'messages': [
                     {
                         'role': 'system',
-                        'content': "You are Aura, a compassionate AI Health & Wellness Assistant research aide. Find the most recent, evidence-based medical information for the user's health query. Focus on reputable sources like peer-reviewed journals, medical organizations, and clinical guidelines. Include information about symptoms, treatments, and when to seek professional care. Explain medical terms in simple language. Prioritize user safety and always include disclaimers about the importance of professional medical consultation."
+                        'content': "You are Aura, a compassionate AI Health & Wellness Assistant research aide. Find the most recent, evidence-based medical information for the user's health query. Focus on reputable sources like peer-reviewed journals, medical organizations, and clinical guidelines. Include information about symptoms, treatments, and when to seek professional care. Explain medical terms in simple language. Prioritize user safety and always include disclaimers about the importance of professional medical consultation. Keep your response concise and focused - under 650 words."
                     },
                     {
                         'role': 'user',
@@ -251,11 +250,11 @@ def get_groq_summary(text):
         completion = groq_client.chat.completions.create(
             model=model_to_use,
             messages=[
-                {"role": "system", "content": "You are Aura, a compassionate AI Health & Wellness Assistant. Refine the following health information into a clear, structured response for a patient using a conversational, gentle, and reassuring tone. Include: 1) Key medical facts explained in simple terms, 2) Practical self-care advice, 3) When to seek professional medical help with clear guidance, 4) Empathetic acknowledgments of their concerns. Keep it concise but comprehensive. Use simple language and bullet points where appropriate. Always start with empathy and end with a safety disclaimer when providing significant health advice."},
+                {"role": "system", "content": "You are Aura, a compassionate AI Health & Wellness Assistant. Refine the following health information into a clear, structured response for a patient using a conversational, gentle, and reassuring tone. Include: 1) Key medical facts explained in simple terms, 2) Practical self-care advice, 3) When to seek professional medical help with clear guidance, 4) Empathetic acknowledgments of their concerns. Keep it concise and strictly under 650 words. Use simple language and bullet points where appropriate. Always start with empathy and end with a safety disclaimer when providing significant health advice."},
                 {"role": "user", "content": text}
             ],
             temperature=0.7,
-            max_tokens=8192,
+            max_tokens=1500,  # Reduced from 8192 to help control output length
             top_p=1,
             stream=False,  # Changed to False for non-streaming
             stop=None
@@ -316,8 +315,9 @@ def send_whatsapp_message(to_phone, message_body):
         logger.error("Cannot send message, Twilio client not initialized.")
         return False
     
-    # Split message into parts if it exceeds Twilio's limit for WhatsApp (1600 characters)
-    max_length = 1600
+    # For this health assistant, we want to keep messages as single cohesive responses
+    # The AI should already be generating responses under 650 words, well within WhatsApp's limit
+    max_length = 1600  # Twilio's limit for WhatsApp messages
     
     # If message is within limit, send as is
     if len(message_body) <= max_length:
@@ -334,40 +334,21 @@ def send_whatsapp_message(to_phone, message_body):
             logger.error(f"Failed to send Twilio message: {e}")
             return False
     
-    # If message exceeds limit, split into parts
-    logger.info(f"Message length {len(message_body)} exceeds limit. Splitting into parts...")
+    # If message exceeds limit (which should be rare with our 650-word limit), log warning and truncate
+    logger.warning(f"Message length {len(message_body)} exceeds limit. Truncating to {max_length} characters to maintain single message.")
+    truncated_message = message_body[:max_length] + "... [message truncated to maintain single message format]"
     
-    # Split message into chunks
-    chunk_size = 1500
-    chunks = [message_body[i:i+chunk_size] for i in range(0, len(message_body), chunk_size)]
-    total_parts = len(chunks)
-    
-    logger.info(f"Split message into {total_parts} parts.")
-    
-    # Send each part
-    success_count = 0
-    for i, chunk in enumerate(chunks):
-        part_number = i + 1
-        
-        logger.info(f"Sending part {part_number} of {total_parts} to {to_phone}...")
-        try:
-            message = twilio_client.messages.create(
-                from_=Config.TWILIO_PHONE_NUMBER,
-                body=chunk,
-                to=to_phone
-            )
-            logger.info(f"Part {part_number} sent successfully to {to_phone} (SID: {message.sid})")
-            success_count += 1
-            
-            # Add a small delay between parts to help ensure order
-            import time
-            if part_number < total_parts:
-                time.sleep(1)
-        except Exception as e:
-            logger.error(f"Failed to send part {part_number} of Twilio message: {e}")
-    
-    # Return True only if all parts were sent successfully
-    return success_count == total_parts
+    try:
+        message = twilio_client.messages.create(
+            from_=Config.TWILIO_PHONE_NUMBER,
+            body=truncated_message,
+            to=to_phone
+        )
+        logger.info(f"Truncated message sent successfully to {to_phone} (SID: {message.sid})")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send truncated Twilio message: {e}")
+        return False
 
 def process_message_background(user_phone, user_message):
     logger.info(f"Starting background processing for user {user_phone}.")
